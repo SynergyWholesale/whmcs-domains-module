@@ -8,6 +8,7 @@
  */
 
 use Illuminate\Database\Capsule\Manager as Capsule;
+use Carbon\Carbon;
 
 define('API_ENDPOINT', 'https://{{API}}');
 define('WHOIS_URL', 'https://{{FRONTEND}}/home/whmcs-whois-json');
@@ -1004,7 +1005,6 @@ function synergywholesaledomains_TransferSync(array $params)
             break;
         case 'transfer_rejected':
         case 'transfer_cancelled':
-        case 'transfer_cancelled':
         case 'transfer_rejected_registry':
         case 'transfer_timeout':
             return [
@@ -1468,6 +1468,82 @@ function synergywholesaledomains_manageChildHosts(array $params)
 }
 
 /**
+ * Controller for the "Initiate CoR" page.
+ *
+ * @param array $params
+ * @return array
+ */
+function synergywholesaledomains_initiateAuCorClient(array $params): array
+{
+    $errors = $vars = [];
+
+    // Get pricing for input field
+    $vars['pricing'] = getTLDPriceList($params['tld'], false);
+    // Remove 10 year renewal since it's not possible.
+    unset($vars['pricing']['10']);
+
+    // Check for any current Cors
+    $cor = Capsule::table('tbldomains_extra')
+        ->where([
+            ['domain_id', $params['domainid']],
+            ['name', 'like', 'cor_%'],
+        ])
+        ->first();
+
+    // If a Cor exists return invoice ID
+    $vars['cor'] = !empty($cor) ? substr($cor->name, 4) : '';
+
+    // If renewal period and no Cors exists
+    if (!empty($_REQUEST['renewalLength']) && empty($vars['cor'])) {
+        $renewalLength = $_REQUEST['renewalLength'];
+        // If valid period create an invoice and add meta
+        if (array_key_exists($renewalLength, $vars['pricing'])) {
+            $invoiceData = [
+                'userid' => $params['userid'],
+                'itemdescription1' => "Initiate CoR for {$params['domain']}",
+                'itemamount1' => $vars['pricing'][$renewalLength]['renew'],
+            ];
+
+            $invoice = localAPI('CreateInvoice', $invoiceData);
+
+            if ($invoice['result'] == 'success') {
+                // Add meta for domain extras with cor_invoiceId, value will be the renewal length
+                Capsule::table('tbldomains_extra')->create([
+                    'domain_id' => $params['domainid'],
+                    'name' => "cor_{$invoice['invoiceid']}",
+                    'value' => $renewalLength,
+                    'created_at' => Carbon::now(),
+                    'updated_at' => Carbon::now(),
+                ]);
+            } else {
+                $errors[] = 'Failed to create invoice.';
+            }
+        } else {
+            $errors[] = 'Selected renewal length is invalid.';
+        }
+    }
+
+    if (!empty($errors)) {
+        $vars['error'] = implode('<br>', $errors);
+    }
+
+    $uri = 'clientarea.php?' . http_build_query([
+            'action' => 'domaindetails',
+            'domainid' => $params['domainid'],
+            'modop' => 'custom',
+            'a' => 'initiateAuCorClient',
+        ]);
+
+    return [
+        'templatefile' => 'domaincor',
+        'breadcrumb'   => [
+            $uri => 'Initiate CoR',
+        ],
+        'vars' => $vars,
+    ];
+}
+
+/**
  * Adds a URL Forwarder. This functionality is only available when
  * using the Synergy Wholesale "DNS Hosting" DNS/Nameserver configuration.
  *
@@ -1499,7 +1575,7 @@ function synergywholesaledomains_DelURLForward(array $record, array $params)
 {
     return synergywholesaledomains_apiRequest('deleteSimpleURLForward', $params, [
         'recordID' => $record['record_id'],
-    ], $false);
+    ], false);
 }
 
 /**
@@ -1978,12 +2054,12 @@ function synergywholesaledomains_push(array $params)
 }
 
 /**
- * Register our custom pages pages we want to display in the Client Area.
+ * Register our custom pages we want to display in the Client Area.
  *
  * @param array $params
- * @return mixed
+ * @return array
  */
-function synergywholesaledomains_ClientAreaCustomButtonArray(array $params)
+function synergywholesaledomains_ClientAreaCustomButtonArray(array $params): array
 {
     $pages = [
         'Manage Child Host Records' => 'manageChildHosts',
@@ -1991,7 +2067,9 @@ function synergywholesaledomains_ClientAreaCustomButtonArray(array $params)
         'Manage DNSSEC Records'     => 'manageDNSSEC',
     ];
 
-    // We have space here for conditional logic in case we require it.
+    if (substr($params['tld'], -3) == '.au') {
+        $pages = array_merge($pages, ['Initiate CoR' => 'initiateAuCorClient']);
+    }
 
     return $pages;
 }
@@ -2232,12 +2310,56 @@ function synergywholesaledomains_validateAUState($state)
     }
 }
 
-function synergywholesaledomains_AdminCustomButtonArray()
+function synergywholesaledomains_AdminCustomButtonArray(array $params)
 {
-    return [
+    $buttons =  [
         'Sync' => 'sync_adhoc',
         'Push' => 'push',
     ];
+
+    if (substr($params['tld'], -3) == '.au') {
+        $buttons = array_merge($buttons, ['Initiate .au CoR' => 'initiateAuCor']);
+    }
+
+    return $buttons;
+}
+
+/**
+ * @param array $params
+ * @return array|string[]|void
+ */
+function synergywholesaledomains_initiateAuCor(array $params)
+{
+    // Get domain Info
+    try {
+        $domainInfo = Capsule::table('tbldomains')
+            ->where('id', $params['domainid'])
+            ->first();
+    } catch (Exception $e) {
+        logModuleCall('synergywholesaledomains', 'initiateAuCor', 'Select DB', $e->getMessage());
+        return [
+            'error' => $e->getMessage(),
+        ];
+    }
+
+    // Check if it's a .au domain
+    if (substr($domainInfo->domain, -3) != '.au') {
+        return [
+            'error' => 'Selected domain is not .au',
+        ];
+    }
+
+    try {
+        // If it is we can send the Cor Request
+        synergywholesaledomains_apiRequest('initiateAUCOR', $params, [
+            'years' => $params['renewal'] ?? 1, // Admin default is 1, client can provide input
+            'domainName' => $params['domainName'] ?? '', // needed for the hook
+        ], true);
+    } catch (Exception $e) {
+        return [
+            'error' => $e->getMessage(),
+        ];
+    }
 }
 
 function synergywholesaledomains_sync_adhoc(array $params)

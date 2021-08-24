@@ -280,6 +280,21 @@ function synergywholesaledomains_getConfigArray(array $params)
             'Type' => 'yesno',
             'Description' => 'Enable this option to force update the WHOIS.json data<br><b>NOTE:</b> This option will be disabled automatically again once you have clicked \'Save Changes\' and the update sequence is completed.',
         ],
+        'defaultDnsConfig' => [
+            'FriendlyName' => 'Default DNS Config',
+            'Type' => 'dropdown',
+            'Options' => [
+                '0' => 'Nothing',
+                '1' => 'Nameservers',
+                '2' => 'FreeDNS with email forwarding',
+                '3' => 'Parked',
+                '4' => 'FreeDNS',
+                '5' => 'SWS Account Default',
+                '6' => 'Legacy Hosting',
+                '7' => 'Wholesale Hosting'
+            ],
+            'Description' => 'Which Default DNS Config will be applied to newly registered domains',
+        ],
         'Version' => [
             'Description' => 'This module version: ' . SW_MODULE_VERSION,
         ],
@@ -610,9 +625,10 @@ function synergywholesaledomains_RegisterDomain(array $params)
         $request['costPrice'] = $params['premiumCost'];
         $request['premium'] = true;
     }
-    
+
     try {
         synergywholesaledomains_apiRequest('domainRegister', $params, $request);
+
         return [
             'success' => true,
         ];
